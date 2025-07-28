@@ -1,54 +1,72 @@
+import os
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score
+import numpy as np
+import joblib
+
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.metrics import confusion_matrix
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.tree import DecisionTreeClassifier
 
-# Load the data
-df = pd.read_csv("hmeq.csv")
+# --- PARAMETERS ---
+DATA_PATH = os.path.join('data', 'hmeq.csv')  # Adjust if your file is not in data/
+MODEL_DIR = 'models'
+K_BEST_FEATURES = 10
+RANDOM_STATE = 42
 
-# Separate target and predictors
-y = df.BAD
-X = df.drop(['BAD'], axis=1)
+# --- 1. LOAD DATASET ---
+df = pd.read_csv(DATA_PATH)
 
-# Get column names by type
-num_cols = X.select_dtypes(include=['number']).columns
-cat_cols = X.select_dtypes(include=['object']).columns
+# --- 2. BASIC CLEANING ---
+cat_features = ["REASON", "JOB"]
+num_features = [col for col in df.select_dtypes(include=[np.number]).columns if col != "BAD"]
 
-# Preprocessing for numerical data
-num_transformer = SimpleImputer(strategy='mean')
+# --- 3. IMPUTE MISSING VALUES ---
+imputer_cat = SimpleImputer(strategy='most_frequent')
+imputer_num = SimpleImputer(strategy='mean')
 
-# Preprocessing for categorical data
-cat_transformer = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='constant', fill_value='Missing')),
-    ('onehot', OneHotEncoder(handle_unknown='ignore'))
-])
+df[cat_features] = imputer_cat.fit_transform(df[cat_features])
+df[num_features] = imputer_num.fit_transform(df[num_features])
 
-# Bundle preprocessing for numerical and categorical data
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', num_transformer, num_cols),
-        ('cat', cat_transformer, cat_cols)
-    ])
+# --- 4. ENCODE CATEGORICAL FEATURES ---
+encoder = OneHotEncoder(drop='first', sparse_output=False)
+encoded_cat = encoder.fit_transform(df[cat_features])
+encoded_cat_df = pd.DataFrame(encoded_cat, columns=encoder.get_feature_names_out(cat_features), index=df.index)
+df_full = pd.concat([df.drop(columns=cat_features), encoded_cat_df], axis=1)
 
-# Define the model
-model = RandomForestClassifier(n_estimators=10, random_state=0)
+# --- 5. FEATURE SELECTION ---
+X = df_full.drop(columns=['BAD'])
+y = df_full['BAD']
 
-# Create and fit the pipeline
-clf = Pipeline(steps=[('preprocessor', preprocessor),
-                      ('model', model)])
+fs = SelectKBest(score_func=f_classif, k=K_BEST_FEATURES)
+X_selected = fs.fit_transform(X, y)
+selected_features = X.columns[fs.get_support()]
 
-# Divide data into training and validation subsets
-X_train, X_valid, y_train, y_valid = train_test_split(X, y, train_size=0.8, test_size=0.2, random_state=0)
+# --- 6. SPLIT DATA ---
+X_train, X_test, y_train, y_test = train_test_split(
+    X[selected_features], y, test_size=0.33, random_state=RANDOM_STATE
+)
 
-# Fit and score
+# --- 7. TRAIN MODEL ---
+clf = DecisionTreeClassifier(max_depth=100, random_state=RANDOM_STATE)
 clf.fit(X_train, y_train)
-preds = clf.predict(X_valid)
 
-print("Accuracy:", accuracy_score(y_valid, preds))
+print("Model trained on selected features:")
+print(selected_features)
 
+# --- 8. EVALUATE ---
+from sklearn.metrics import classification_report
+y_pred = clf.predict(X_test)
+print(classification_report(y_test, y_pred))
 
+# --- 9. SAVE ALL OBJECTS ---
+os.makedirs(MODEL_DIR, exist_ok=True)
+joblib.dump(imputer_cat, os.path.join(MODEL_DIR, 'imputer_cat.joblib'))
+joblib.dump(imputer_num, os.path.join(MODEL_DIR, 'imputer_num.joblib'))
+joblib.dump(encoder, os.path.join(MODEL_DIR, 'encoder.joblib'))
+joblib.dump(fs, os.path.join(MODEL_DIR, 'selector.joblib'))
+joblib.dump(clf, os.path.join(MODEL_DIR, 'decision_tree.joblib'))
+joblib.dump(selected_features, os.path.join(MODEL_DIR, 'selected_features.joblib'))
+
+print(f"Saved all pipeline objects to ./{MODEL_DIR}/")
